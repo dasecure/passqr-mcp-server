@@ -1,6 +1,6 @@
 {
   "name": "passqr-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "MCP server for PassQR — manage digital passes from Claude and other LLM clients.",
   "private": true,
   "type": "module",
@@ -10,7 +10,8 @@
     "tail": "wrangler tail"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@modelcontextprotocol/sdk": "^1.20.2",
+    "fetch-to-node": "^2.1.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
