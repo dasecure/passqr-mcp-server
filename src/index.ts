@@ -1,34 +1,23 @@
 /**
  * PassQR MCP Server — Cloudflare Worker entry point.
  *
- * Exposes an MCP JSON-RPC endpoint at /mcp over plain HTTP POST.
+ * Uses the official StreamableHTTPServerTransport from @modelcontextprotocol/sdk
+ * v1.20+ with a Fetch→Node shim (fetch-to-node) so Workers can speak the full
+ * Streamable HTTP spec that Claude.ai requires.
  *
- * Auth resolution order:
- *   1. `X-PassQR-API-Key` header          — multi-tenant / dev clients
- *   2. `Authorization: Bearer pqr_live_…` — multi-tenant / standard clients
- *   3. Worker secret `PASSQR_API_KEY`     — single-tenant fallback (Claude.ai)
- *
- * Claude.ai's custom connectors currently only allow OAuth or no-auth.
- * The secret fallback lets a single owner run a private, pre-keyed server
- * without headers. For multi-user deployments, run without the secret
- * and require the header.
- *
- * Why we don't use StreamableHTTPServerTransport:
- *   v1.0.x of the MCP SDK's transport expects Node req/res pairs.
- *   Workers give us a Fetch Request. Rather than shim one into the other,
- *   we drive the lower-level Server directly — same code path, fewer deps.
+ * Auth resolution:
+ *   1. `X-PassQR-API-Key` header
+ *   2. `Authorization: Bearer pqr_live_…`
+ *   3. Worker secret `PASSQR_API_KEY` (single-tenant fallback for Claude.ai)
  */
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { toFetchResponse, toReqRes } from "fetch-to-node";
 import { registerAllTools } from "./tools/index.js";
 
 export interface Env {
   PASSQR_API_BASE: string;
-  // Set via `wrangler secret put PASSQR_API_KEY`.
-  // When present, acts as the fallback key for requests that arrive
-  // without `X-PassQR-API-Key` or `Authorization: Bearer` headers.
   PASSQR_API_KEY?: string;
-  // Legacy / dev alias — still honored but prefer PASSQR_API_KEY.
   PASSQR_API_KEY_DEFAULT?: string;
 }
 
@@ -46,96 +35,38 @@ function extractApiKey(request: Request, env: Env): string | null {
   return null;
 }
 
-// Claude.ai and other MCP hosts may preflight with OPTIONS before POSTing.
 const CORS_HEADERS: Record<string, string> = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "POST, OPTIONS",
+  "access-control-allow-methods": "GET, POST, OPTIONS, DELETE",
   "access-control-allow-headers":
-    "content-type, authorization, x-passqr-api-key, mcp-protocol-version",
+    "content-type, authorization, x-passqr-api-key, mcp-protocol-version, mcp-session-id",
+  "access-control-expose-headers": "mcp-session-id",
   "access-control-max-age": "86400",
 };
 
-function jsonResponse(body: unknown, status = 200): Response {
+function corsJson(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: {
-      "content-type": "application/json",
-      ...CORS_HEADERS,
-    },
+    headers: { "content-type": "application/json", ...CORS_HEADERS },
   });
-}
-
-async function handleJsonRpc(
-  mcp: McpServer,
-  message: {
-    jsonrpc: string;
-    id?: number | string;
-    method: string;
-    params?: unknown;
-  }
-): Promise<unknown> {
-  const underlying = (mcp as unknown as { server: Server }).server;
-
-  const handlers = (underlying as unknown as {
-    _requestHandlers: Map<
-      string,
-      (req: unknown, extra: unknown) => Promise<unknown>
-    >;
-  })._requestHandlers;
-
-  const handler = handlers.get(message.method);
-  if (!handler) {
-    return {
-      jsonrpc: "2.0",
-      id: message.id ?? null,
-      error: {
-        code: -32601,
-        message: `Method not found: ${message.method}`,
-      },
-    };
-  }
-
-  try {
-    const result = await handler(
-      { method: message.method, params: message.params ?? {} },
-      { signal: new AbortController().signal }
-    );
-    return {
-      jsonrpc: "2.0",
-      id: message.id ?? null,
-      result,
-    };
-  } catch (err) {
-    const e = err as { code?: number; message?: string };
-    return {
-      jsonrpc: "2.0",
-      id: message.id ?? null,
-      error: {
-        code: e.code ?? -32603,
-        message: e.message ?? String(err),
-      },
-    };
-  }
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // CORS preflight.
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
     if (url.pathname === "/" || url.pathname === "/health") {
-      return jsonResponse({
+      return corsJson({
         ok: true,
         service: "passqr-mcp-server",
-        version: "0.1.1",
+        version: "0.1.2",
         endpoint: "/mcp",
-        auth: env.PASSQR_API_KEY
-          ? "secret-fallback-enabled"
-          : "header-required",
+        transport: "streamable-http",
+        auth: env.PASSQR_API_KEY ? "secret-fallback-enabled" : "header-required",
       });
     }
 
@@ -146,42 +77,21 @@ export default {
       });
     }
 
-    if (request.method !== "POST") {
-      return jsonResponse(
-        { error: "method_not_allowed", message: "POST only" },
-        405
-      );
-    }
-
     const apiKey = extractApiKey(request, env);
     if (!apiKey) {
-      return jsonResponse(
+      return corsJson(
         {
           error: "missing_credentials",
           message:
-            "No API key configured. Either send `X-PassQR-API-Key: pqr_live_…` " +
-            "or set the `PASSQR_API_KEY` Worker secret for single-tenant use.",
+            "No API key configured. Send `X-PassQR-API-Key` or set the `PASSQR_API_KEY` Worker secret.",
         },
         401
       );
     }
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return jsonResponse(
-        {
-          jsonrpc: "2.0",
-          id: null,
-          error: { code: -32700, message: "Parse error" },
-        },
-        400
-      );
-    }
-
+    // Build a fresh MCP server per request — stateless is fine for our tool surface.
     const server = new McpServer(
-      { name: "passqr", version: "0.1.1" },
+      { name: "passqr", version: "0.1.2" },
       {
         capabilities: { tools: {} },
         instructions:
@@ -194,21 +104,50 @@ export default {
 
     registerAllTools(server, { apiKey, apiBase: env.PASSQR_API_BASE });
 
-    const messages = Array.isArray(body) ? body : [body];
-    const results = await Promise.all(
-      messages.map((msg) =>
-        handleJsonRpc(
-          server,
-          msg as {
-            jsonrpc: string;
-            id?: number | string;
-            method: string;
-            params?: unknown;
-          }
-        )
-      )
-    );
+    // Adapt Fetch Request → Node req/res so we can use the real transport.
+    const { req, res } = toReqRes(request);
 
-    return jsonResponse(Array.isArray(body) ? results : results[0]);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // stateless mode
+      enableJsonResponse: true, // allow JSON fallback for non-SSE clients
+    });
+
+    // Ensure transport is torn down when the response closes to avoid leaks.
+    res.on("close", () => {
+      transport.close();
+      server.close();
+    });
+
+    await server.connect(transport);
+
+    try {
+      const body =
+        request.method === "POST" ? await request.clone().json() : undefined;
+      await transport.handleRequest(req, res, body);
+    } catch (err) {
+      console.error("MCP transport error:", err);
+      if (!res.headersSent) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32603, message: "Internal server error" },
+          })
+        );
+      }
+    }
+
+    const response = await toFetchResponse(res);
+
+    // Merge CORS headers onto the SDK's response.
+    const merged = new Headers(response.headers);
+    for (const [k, v] of Object.entries(CORS_HEADERS)) merged.set(k, v);
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: merged,
+    });
   },
 };
