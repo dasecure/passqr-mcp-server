@@ -1,0 +1,17 @@
+name = "passqr-mcp-server"
+main = "src/index.ts"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Route this Worker at mcp.passqr.com/*
+# Uncomment after DNS is pointed at Cloudflare and the zone is active:
+#
+# routes = [
+#   { pattern = "mcp.passqr.com/*", zone_name = "passqr.com" }
+# ]
+
+[vars]
+PASSQR_API_BASE = "https://www.passqr.com"
+
+[observability]
+enabled = true
