@@ -29,7 +29,7 @@ export class PassQRClient {
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${this.config.apiKey}`,
-        "user-agent": "passqr-mcp-server/0.1.0",
+        "user-agent": "passqr-mcp-server/0.2.0",
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
@@ -126,6 +126,16 @@ export class PassQRClient {
       code,
     });
   }
+
+  // --- Admin (partner-key only) ---
+
+  createBusiness(input: CreateBusinessInput) {
+    return this.request<CreateBusinessResponse>(
+      "POST",
+      `/api/v1/admin/businesses`,
+      input
+    );
+  }
 }
 
 // --- Types ---
@@ -202,4 +212,31 @@ export interface ValidateResult {
     type: string;
     color: string | null;
   } | null;
+}
+
+export interface CreateBusinessInput {
+  name: string;
+  owner_email: string;
+  plan?: "free" | "starter" | "pro";
+  country?: string;
+  industry?: string;
+  website?: string;
+  brand_color?: string;
+  logo_url?: string;
+  metadata?: Record<string, unknown>;
+  idempotency_key?: string;
+}
+
+export interface CreateBusinessResponse {
+  data: {
+    business_id: string;
+    owner_user_id: string | null;
+    api_key: string | null;          // plaintext, returned ONCE; null on idempotent replay
+    api_key_last_four: string;
+    mcp_url: string;
+    dashboard_url: string;
+    plan: string;
+    reused: boolean;                 // true if returned from idempotency cache
+  };
+  warning?: string;
 }

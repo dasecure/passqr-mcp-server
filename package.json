@@ -1,6 +1,6 @@
 {
   "name": "passqr-mcp-server",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "MCP server for PassQR — manage digital passes from Claude and other LLM clients.",
   "private": true,
   "type": "module",
