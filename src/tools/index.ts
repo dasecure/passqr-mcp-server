@@ -4,6 +4,7 @@ import { registerValidateTool } from "./validate.js";
 import { registerTemplateTools } from "./templates.js";
 import { registerPassTools } from "./passes.js";
 import { registerWalletTools } from "./wallet.js";
+import { registerAdminTools } from "./admin.js";
 
 export interface ToolContext {
   apiKey: string;
@@ -20,6 +21,7 @@ export function registerAllTools(server: McpServer, ctx: ToolContext) {
   registerTemplateTools(server, client);
   registerPassTools(server, client);
   registerWalletTools(server, ctx.apiBase);
+  registerAdminTools(server, client);
 }
 
 /**
